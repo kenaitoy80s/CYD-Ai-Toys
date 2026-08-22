@@ -1,0 +1,268 @@
+#include <WiFi.h>
+#include <time.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <U8g2_for_Adafruit_GFX.h>
+
+#include "u8g2_mfyuehei_18_gb2312.h"
+
+// ==========================================
+// WiFi
+// ==========================================
+const char* ssid = "MOMO";
+const char* password = "xxxx";
+
+// San Francisco / Pacific Time
+const char* timezone = "PST8PDT";
+
+// ==========================================
+// CYD / TPM408-2.8
+// ==========================================
+#define TFT_CS    15
+#define TFT_RST   4
+#define TFT_DC    2
+#define TFT_MOSI  13
+#define TFT_SCLK  14
+#define TFT_BL    21
+
+Adafruit_ST7789 tft(
+  TFT_CS,
+  TFT_DC,
+  TFT_MOSI,
+  TFT_SCLK,
+  TFT_RST
+);
+
+U8G2_FOR_ADAFRUIT_GFX u8g2;
+
+// ==========================================
+// 中文星期
+// ==========================================
+const char* weekCN[] = {
+  "星期日",
+  "星期一",
+  "星期二",
+  "星期三",
+  "星期四",
+  "星期五",
+  "星期六"
+};
+
+// ==========================================
+// Setup
+// ==========================================
+void setup() {
+
+  Serial.begin(115200);
+  delay(500);
+
+  // 背光
+  pinMode(TFT_BL, OUTPUT);
+  analogWrite(TFT_BL, 200);
+
+  // 屏幕
+  tft.init(240, 320);
+  tft.setRotation(1);
+  tft.invertDisplay(false);
+  tft.fillScreen(ST77XX_BLACK);
+
+  // U8g2
+  u8g2.begin(tft);
+
+  // ------------------------------
+  // WiFi 连接
+  // ------------------------------
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(20, 100);
+  tft.println("WiFi...");
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("WiFi connected");
+
+  // ------------------------------
+  // NTP 校时
+  // ------------------------------
+  configTzTime(
+    timezone,
+    "pool.ntp.org",
+    "time.nist.gov"
+  );
+
+  tft.fillScreen(ST77XX_BLACK);
+
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(20, 100);
+  tft.println("正在校准时间");
+
+  struct tm timeinfo;
+
+  while (!getLocalTime(&timeinfo)) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("Time synchronized");
+
+  tft.fillScreen(ST77XX_BLACK);
+}
+
+// ==========================================
+// 显示时间
+// ==========================================
+void drawClock(struct tm* timeinfo) {
+
+  // ----------------------------------------
+  // 整屏清除
+  // V1 先追求稳定
+  // ----------------------------------------
+  tft.fillScreen(ST77XX_BLACK);
+
+  // ----------------------------------------
+  // 时间：12小时制
+  // ----------------------------------------
+  int hour12 = timeinfo->tm_hour % 12;
+
+  if (hour12 == 0) {
+    hour12 = 12;
+  }
+
+  char timeStr[10];
+
+  snprintf(
+    timeStr,
+    sizeof(timeStr),
+    "%d:%02d",
+    hour12,
+    timeinfo->tm_min
+  );
+
+  // 时间用 GFX 大字
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(5);
+
+  // 居中
+  int16_t x1, y1;
+  uint16_t w, h;
+
+  tft.getTextBounds(
+    timeStr,
+    0,
+    0,
+    &x1,
+    &y1,
+    &w,
+    &h
+  );
+
+  tft.setCursor(
+    (320 - w) / 2,
+    25
+  );
+
+  tft.println(timeStr);
+
+  // ----------------------------------------
+  // 上午 / 下午
+  // ----------------------------------------
+  const char* ampm;
+
+  if (timeinfo->tm_hour < 12) {
+    ampm = "上午";
+  } else {
+    ampm = "下午";
+  }
+
+  u8g2.setFont(u8g2_mfyuehei_18_gb2312);
+  u8g2.setForegroundColor(ST77XX_WHITE);
+
+  u8g2.drawUTF8(
+    145,
+    105,
+    ampm
+  );
+
+  // ----------------------------------------
+  // 日期：8月20日2026年
+  // ----------------------------------------
+  char dateCN[40];
+
+  snprintf(
+    dateCN,
+    sizeof(dateCN),
+    "%d月%d日%d年",
+    timeinfo->tm_mon + 1,
+    timeinfo->tm_mday,
+    timeinfo->tm_year + 1900
+  );
+
+  u8g2.drawUTF8(
+    95,
+    145,
+    dateCN
+  );
+
+  // ----------------------------------------
+  // 星期
+  // ----------------------------------------
+  u8g2.drawUTF8(
+    135,
+    180,
+    weekCN[timeinfo->tm_wday]
+  );
+
+  // ----------------------------------------
+  // 旧金山时间
+  // ----------------------------------------
+  u8g2.drawUTF8(
+    125,
+    220,
+    "旧金山时间"
+  );
+
+  // ----------------------------------------
+  // Serial 调试
+  // ----------------------------------------
+  Serial.printf(
+    "%02d:%02d  %s  %s\n",
+    hour12,
+    timeinfo->tm_min,
+    ampm,
+    dateCN
+  );
+}
+
+// ==========================================
+// Loop
+// ==========================================
+void loop() {
+
+  struct tm timeinfo;
+
+  if (!getLocalTime(&timeinfo)) {
+    delay(1000);
+    return;
+  }
+
+  // 只在“分钟发生变化”时重新画
+  static int lastMinute = -1;
+
+  if (timeinfo.tm_min != lastMinute) {
+
+    lastMinute = timeinfo.tm_min;
+
+    drawClock(&timeinfo);
+  }
+
+  delay(200);
+}
